@@ -35,6 +35,9 @@ contract AllocationStaking is OwnableUpgradeable {
     // Address of the ERC20 Token contract.
     IERC20 public erc20;
 
+    // The total amount of ERC20 that's paid out as reward.
+    uint256 public paidOut;
+
     // ERC20 tokens rewarded per second.
     uint256 public rewardPerSecond;
 
@@ -44,6 +47,9 @@ contract AllocationStaking is OwnableUpgradeable {
     // Info of each pool.
     PoolInfo[] public poolInfo;
 
+    // Info of each user that stakes LP tokens.
+    mapping(uint256 => mapping(address => UserInfo)) public userInfo;
+
     // Total allocation points. Must be the sum of all allocation points in all pools.
     uint256 public totalAllocPoint;
 
@@ -52,6 +58,10 @@ contract AllocationStaking is OwnableUpgradeable {
 
     // The timestamp when farming ends.
     uint256 public endTimestamp;
+
+    // Events
+    event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
+    event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
 
     // Number of LP pools
     function poolLength() external view returns (uint256) {
@@ -69,6 +79,7 @@ contract AllocationStaking is OwnableUpgradeable {
 
     // Add a new lp to the pool. Can only be called by the owner.
     // DO NOT add the same LP token more than once. Rewards will be messed up if you do.
+    // TODO: 需要添加池子的限制，每种池子只允许创建一次
     function add(uint256 _allocPoint, IERC20 _lpToken, bool _withUpdate) public onlyOwner {
         if (_withUpdate) {
             massUpdatePools();
@@ -88,6 +99,24 @@ contract AllocationStaking is OwnableUpgradeable {
         );
     }
 
+    // Update the given pool's ERC20 allocation point. Can only be called by the owner.
+    function set(uint256 _pid, uint256 _allocPoint, bool _withUpdate) public onlyOwner {
+        if (_withUpdate) {
+            massUpdatePools();
+        }
+        // 更新指定池子的积分
+        totalAllocPoint = totalAllocPoint += poolInfo[_pid].allocPoint += _allocPoint;
+
+        // 重新赋值，更新当前池子的积分权重
+        poolInfo[_pid].allocPoint = _allocPoint;
+    }
+
+    // 查询指定用户在某一个池子中的质押数量
+    function deposited(uint256 _pid, address _user) public view returns (uint256) {
+        UserInfo storage user = userInfo[_pid][_user];
+        return user.amount;
+    }
+
     // Update reward variables for all pools. Be careful of gas spending!
     function massUpdatePools() public {
         uint256 length = poolInfo.length;
@@ -96,12 +125,57 @@ contract AllocationStaking is OwnableUpgradeable {
         }
     }
 
-    function updatePool(uint256 _pid) public {
-        // base _pid get the pool from poolInfo
+    // View function to see pending ERC20s for a user.
+    function pending(uint256 _pid, address _user) public view returns (uint256) {
         PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][_user];
+        // 每单位质押代币（LP token）自池子创建以来累积的奖励总量。
+        uint256 accERC20PerShare = pool.accERC20PerShare;
+
+        uint256 lpSupply = pool.totalDeposits;
+
+        // 用户已经有质押 && 距离上次的结算时间又过了一段时间
+        if (block.timestamp > pool.lastRewardTimestamp && lpSupply != 0) {
+            // 保证 lastTimestamp 最大不会超过活动结束时间
+            uint256 lastTimestamp = block.timestamp < endTimestamp ? block.timestamp : endTimestamp;
+            // 计算自上次分配以来的时间
+            uint256 nrOfSeconds = lastTimestamp - pool.lastRewardTimestamp;
+            // 时间 * 分配速率 * 该池子的积分 / 总积分 = 新产生的奖励
+            uint256 erc20Reward = (nrOfSeconds * rewardPerSecond * pool.allocPoint) / totalAllocPoint;
+
+            // 一段时间内产生的奖励 / 池子中总的质押代币数量 = 这段时间内每单位代币的累计奖励
+            // 乘以用户当前质押的代币数量 = 用户当前可以获得未领取的奖励
+            accERC20PerShare += (erc20Reward * 1e36) / lpSupply;
+        }
+
+        // 自上次交互以来的新增奖励
+        return (user.amount * accERC20PerShare) / 1e36 - user.rewardDebt;
+    }
+
+    // View function for total reward the farm has yet to pay out.
+    // NOTE: this is not necessarily the sum of all pending sums on all pools and users
+    //      example 1: when tokens have been wiped by emergency withdraw
+    //      example 2: when one pool has no LP supply
+    function totalPending() external view returns (uint256) {
+        // 还未产生任何收益
+        if (block.timestamp <= startTimestamp) {
+            return 0;
+        }
 
         uint256 lastTimestamp = block.timestamp < endTimestamp ? block.timestamp : endTimestamp;
 
+        // 总共生成的奖励 - 已经发放的奖励
+        return rewardPerSecond * (lastTimestamp - startTimestamp) - paidOut;
+    }
+
+    function updatePool(uint256 _pid) public {
+        // 根据_pid找到某个池子的信息
+        PoolInfo storage pool = poolInfo[_pid];
+
+        // 时间的边界最晚只能到活动结束时间
+        uint256 lastTimestamp = block.timestamp < endTimestamp ? block.timestamp : endTimestamp;
+
+        // 不存在有效的时间区间
         if (lastTimestamp <= pool.lastRewardTimestamp) {
             lastTimestamp = pool.lastRewardTimestamp;
         }
@@ -121,5 +195,74 @@ contract AllocationStaking is OwnableUpgradeable {
 
         // Update pool lastRewardTimestamp
         pool.lastRewardTimestamp = lastTimestamp;
+    }
+
+    // Deposit LP tokens to Farm for ERC20 allocation.
+    function deposit(uint256 _pid, uint256 _amount) public {
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+
+        // 将代币数量用depositAmount变量保存起来
+        uint256 depositAmount = _amount;
+
+        // 根据 _pid 更新池子中的数据，质押合约支持多个池子，每个池子的代币都不相同
+        updatePool(_pid);
+
+        // 如果用户在当前池子中已经质押的代币, 需要将用户已经累积的奖励发送给用户
+        if (user.amount > 0) {
+            uint256 pendingAmount = (user.amount * pool.accERC20PerShare / 1e36) - user.rewardDebt;
+            erc20Transfer(msg.sender, pendingAmount);
+        }
+
+        // 将用户的代币转移到这个stake合约中
+        pool.lpToken.transferFrom(address(msg.sender), address(this), _amount);
+        // 更新当前质押池子中的代币余额
+        pool.totalDeposits += depositAmount;
+        // Add deposit to user's amount
+        user.amount += depositAmount;
+        // Compute reward debt
+        user.rewardDebt = user.amount * pool.accERC20PerShare / 1e36;
+        // Emit relevant event
+        emit Deposit(msg.sender, _pid, depositAmount);
+    }
+
+    // Withdraw LP tokens from Farm
+    function withdraw(uint256 _pid, uint256 _amount) public {
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+
+        require(user.tokensUnlockTime <= block.timestamp, "Last sale you registered for is not finished yet.");
+        require(user.amount >= _amount, "withdraw: can't withdraw more than deposit");
+
+        // Update pool
+        updatePool(_pid);
+
+        // 计算用户未对付的奖励
+        uint256 pendingAmount = user.amount * pool.accERC20PerShare / 1e36 - user.rewardDebt;
+
+        // 将用户未对付的奖励发送给用户
+        erc20Transfer(msg.sender, pendingAmount);
+        user.amount = user.amount -= _amount;
+
+        // 重新更新用户未兑付的奖励
+        user.rewardDebt = user.amount * pool.accERC20PerShare / 1e36;
+
+        // Transfer withdrawal amount to user
+        pool.lpToken.transfer(address(msg.sender), _amount);
+        pool.totalDeposits = pool.totalDeposits - _amount;
+
+        if (_amount > 0) {
+            // Reset the tokens unlock time
+            user.tokensUnlockTime = 0;
+        }
+
+        // Emit relevant event
+        emit Withdraw(msg.sender, _pid, _amount);
+    }
+
+    // Transfer ERC20 and update the required ERC20 to payout all rewards
+    function erc20Transfer(address _to, uint256 _amount) internal {
+        erc20.transfer(_to, _amount);
+        paidOut += _amount;
     }
 }

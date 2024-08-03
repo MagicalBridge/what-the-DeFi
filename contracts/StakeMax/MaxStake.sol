@@ -162,23 +162,32 @@ contract MaxStake is AccessControlUpgradeable {
     function updatePool(uint256 idx) internal {
         Pool storage pool = pools[idx];
 
+        // 活动结束的时间是刚性确定的，活动结束之后不再计算新的奖励
         uint256 lastTime = block.timestamp < endTimeStamp ? block.timestamp : endTimeStamp;
 
+        // 奖励是用过时间线进行线性释放的，lastTime <= pool.lastRewardBlock 之后的运算没有意义
         if (lastTime <= pool.lastRewardBlock) {
             return;
         }
+
+        // 获取代币的总的数量
         uint256 totalSupply = pool.stTokenAmount;
+
         if (totalSupply == 0) {
+            // 如果池子中代币为空，则只更新最后计算时间，不需要计算奖励
             pool.lastRewardBlock = lastTime;
             return;
         }
         // 计算持续时间
+        // 时间差：从上次计算奖励的时间到当前时间这段时间内池子中的质押代币可以获得奖励。
         uint256 effectTime = lastTime - pool.lastRewardBlock;
         uint256 accB2PerST = pool.accB2PerST;
 
+        // 奖励速率 * 持续时间 * 权重 / 总分配点数
         uint256 reward = (rewardPerSecond * (effectTime) * (pool.poolWeight)) / (totalAllocPoint);
         accB2PerST = accB2PerST + ((reward * (1e36)) / (totalSupply));
 
+        //
         pool.accB2PerST = accB2PerST;
         pool.lastRewardBlock = block.timestamp;
         emit UpdatePool(idx, pool.lastRewardBlock, reward);
@@ -187,18 +196,22 @@ contract MaxStake is AccessControlUpgradeable {
     // 质押
     function deposit(uint256 _pid, uint256 amount) external claimUnPaused {
         require(block.timestamp < endTimeStamp, "time is over");
+
         Pool storage pool = pools[_pid];
+
         require(amount >= pool.minDepositAmount, "amount less than limit");
 
         User storage user = userInfo[_pid][msg.sender];
 
         updatePool(_pid);
+
         if (user.stAmount > 0) {
             // 先取出奖励池子里面的奖励，给到质押者
-            // uint256 reward = pending(_pid, msg.sender);
-            // user.finishedB2 += reward;
-            // user.pendingB2 = 0;
-            // ierc20B2.transfer(msg.sender, reward);
+            uint256 reward = pending(_pid, msg.sender);
+
+            user.finishedB2 += reward;
+            user.pendingB2 = 0;
+            ierc20B2.transfer(msg.sender, reward);
         } else {
             user.pendingB2 = (user.stAmount * (pool.accB2PerST)) / (1e36) - user.finishedB2;
         }
@@ -209,5 +222,23 @@ contract MaxStake is AccessControlUpgradeable {
         IERC20(pool.stTokenAddress).transferFrom(msg.sender, address(this), amount);
 
         emit Deposit(_pid, amount);
+    }
+
+    function pending(uint256 _pid, address _user) internal view returns (uint256) {
+        User storage user = userInfo[_pid][_user];
+        Pool storage pool = pools[_pid];
+
+        uint256 accB2PerST = pool.accB2PerST;
+        uint256 totalSupply = pool.stTokenAmount;
+
+        if (block.timestamp > pool.lastRewardBlock && totalSupply > 0) {
+            uint256 lastTime = block.timestamp < endTimeStamp ? block.timestamp : endTimeStamp;
+            uint256 compareLastRewardTime = pool.lastRewardBlock < endTimeStamp ? pool.lastRewardBlock : endTimeStamp;
+            uint256 effectTime = lastTime - compareLastRewardTime;
+            uint256 reward = (rewardPerSecond * effectTime * pool.poolWeight) / (totalAllocPoint);
+            accB2PerST = accB2PerST + ((reward * (1e36)) / (totalSupply));
+        }
+
+        return (user.stAmount * (accB2PerST)) / (1e36) - (user.finishedB2);
     }
 }
