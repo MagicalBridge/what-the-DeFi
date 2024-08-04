@@ -44,12 +44,6 @@ contract AllocationStaking is OwnableUpgradeable {
     // Total rewards added to farm
     uint256 public totalRewards;
 
-    // Info of each pool.
-    PoolInfo[] public poolInfo;
-
-    // Info of each user that stakes LP tokens.
-    mapping(uint256 => mapping(address => UserInfo)) public userInfo;
-
     // Total allocation points. Must be the sum of all allocation points in all pools.
     uint256 public totalAllocPoint;
 
@@ -59,9 +53,16 @@ contract AllocationStaking is OwnableUpgradeable {
     // The timestamp when farming ends.
     uint256 public endTimestamp;
 
+    // Info of each user that stakes LP tokens.
+    mapping(uint256 => mapping(address => UserInfo)) public userInfo;
+
+    // Info of each pool.
+    PoolInfo[] public poolInfo;
+
     // Events
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
+    event CompoundedEarnings(address indexed user, uint256 indexed pid, uint256 amountAdded, uint256 totalDeposited);
 
     // Number of LP pools
     function poolLength() external view returns (uint256) {
@@ -258,6 +259,27 @@ contract AllocationStaking is OwnableUpgradeable {
 
         // Emit relevant event
         emit Withdraw(msg.sender, _pid, _amount);
+    }
+
+    // Function to compound earnings into deposit
+    function compound(uint256 _pid) public {
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][msg.sender];
+
+        require(user.amount >= 0, "User does not have anything staked.");
+
+        // Update pool
+        updatePool(_pid);
+
+        uint256 pendingAmount = user.amount * pool.accERC20PerShare / 1e36 - user.rewardDebt;
+
+        // Increase amount user is staking
+        user.amount = user.amount + pendingAmount;
+        user.rewardDebt = user.amount * pool.accERC20PerShare / 1e36;
+
+        // Increase pool's total deposits
+        pool.totalDeposits = pool.totalDeposits + pendingAmount;
+        emit CompoundedEarnings(msg.sender, _pid, pendingAmount, user.amount);
     }
 
     // Transfer ERC20 and update the required ERC20 to payout all rewards
