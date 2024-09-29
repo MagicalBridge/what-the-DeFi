@@ -12,9 +12,13 @@ contract PackDexWrap {
         owner = _owner;
     }
 
-    // address aggregatorAddress,
-    // bytes calldata aggregatorData
-    function wrapAndExecute(address fromToken, uint256 amount) external payable {
+    function wrapAndExecute(
+        address fromToken,
+        uint256 amount,
+        address uniswapV2Router,
+        uint256 amountOutMin,
+        bytes calldata uniswapV2swapData
+    ) external payable {
         uint256 fee = (amount * FEE_PERCENTAGE) / FEE_DENOMINATOR; // Calculate 0.15% fee
         // native token
         if (fromToken == ETH_ADDRESS) {
@@ -23,14 +27,22 @@ contract PackDexWrap {
             if (msg.value < (amount + fee)) {
                 revert("Insufficient Ether");
             }
-
             // Send fee to owner address
             (bool success,) = owner.call{value: fee}("");
             if (!success) {
                 revert("Paying fee via transfer failed");
             }
             emit FeeReceived(msg.sender, fee);
-        } else { // ERC20 token
+
+            // Call the swapExactETHForTokens function on the Uniswap V2 router
+            // with the encoded swap data
+            (bool swapSuccessFlag,) = uniswapV2Router.call{value: amount}(uniswapV2swapData);
+            if (!swapSuccessFlag) {
+                revert("Uniswap V2 swap failed");
+            }
+            emit SwapCompleted(msg.sender, amountOutMin);
+        } else {
+            // ERC20 token
         }
     }
 
@@ -38,4 +50,6 @@ contract PackDexWrap {
      * @notice event emitted every time a fee is received from a user.
      */
     event FeeReceived(address indexed user, uint256 fee);
+
+    event SwapCompleted(address indexed user, uint256 amountOutMin);
 }
