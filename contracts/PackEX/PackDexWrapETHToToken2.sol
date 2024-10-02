@@ -17,15 +17,11 @@ contract PackDexWrapETHToToken {
     function wrapAndExecute(bytes calldata swapData, uint256 amount) external payable {
         uint256 fee = (amount * FEE_PERCENTAGE) / FEE_DENOMINATOR;
 
-        require(msg.value >= (amount + fee), "Incorrect Ether value");
+        require(msg.value >= (amount + fee), "Not enough ETH sent");
 
         (bool success,) = owner.call{value: fee}("");
         require(success, "Paying fee via transfer failed");
         emit FeeReceived(msg.sender, fee);
-
-        address[] memory path = new address[](2);
-        path[0] = 0xf46F9847a153480C85BDa37251170f2A3C5A87a8; // WETH address
-        path[1] = 0xA6f1076DdAfCD7DebdCeA36918C2E7C42dDd9b86; // Token address
 
         (bool successFlag,) = UNISWAP_V2_ROUTER.call{value: msg.value - fee}(swapData);
         require(successFlag, "Paying fee via transfer failed");
